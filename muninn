@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# muninn — memory for your GitHub estate. Reports on $MUNINN_ROOT (default ~/github-repos).
+# Odin's other raven — huginn's twin: huginn is the present, muninn is the past and its narrative.
+#
+#   muninn log | releases | digest | init
+#   run 'muninn help' for the menu, or 'muninn <command> help' for per-command detail.
+set -uo pipefail
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"; HERE="$(cd "$(dirname "$SELF")" && pwd)"
+
+# ── configuration — env  >  config file  >  smart defaults ────────────────
+CONFIG="${MUNINN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/muninn/config}"
+for _v in ROOT OWNER FAMILY SINCE; do eval "_env_$_v=\${MUNINN_$_v-}"; done
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+# free config for huginn users — if MUNINN_* is unset, fall back to huginn's config
+HCONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/huginn/config"
+[ -f "$HCONFIG" ] && . "$HCONFIG"
+
+ROOT="${_env_ROOT:-${MUNINN_ROOT:-${HUGINN_ROOT:-$HOME/github-repos}}}"
+OWNER="${_env_OWNER:-${MUNINN_OWNER:-${HUGINN_OWNER:-}}}"          # resolved lazily — see need_owner
+FAMILY="${_env_FAMILY:-${MUNINN_FAMILY:-${HUGINN_FAMILY:-}}}"      # space-separated repos to exclude
+SINCE="${_env_SINCE:-${MUNINN_SINCE:-1w}}"                         # default --since window
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; M=$'\e[35m'; DIM=$'\e[2m'; BD=$'\e[1m'; X=$'\e[0m'
+else R=; G=; Y=; C=; M=; DIM=; BD=; X=; fi
+
+is_family(){ case " $FAMILY " in *" $1 "*) return 0;; *) return 1;; esac; }
+is_help(){ case "${1:-}" in help|-h|--help) return 0;; *) return 1;; esac; }
+repos(){ (cd "$ROOT" && for d in */; do [ -d "${d}.git" ] && echo "${d%/}"; done | sort); }
+need_owner(){ [ -n "$OWNER" ] && return 0; OWNER="$(gh api user --jq .login 2>/dev/null)"; [ -n "$OWNER" ] && return 0; printf "  ${R}no GitHub owner set.${X} Set MUNINN_OWNER, add it to %s, or run ${BD}muninn init${X}.\n" "$CONFIG" >&2; return 1; }
+
+# ── log (activity timeline — commits, merged PRs, releases) ───────────────
+cmd_log(){
+  is_help "${1:-}" && { help_log; return 0; }
+  printf "  ${DIM}(not yet implemented — coming in the next PR)${X}\n"
+}
+
+# ── releases (changelog-of-changelogs) ─────────────────────────────────────
+cmd_releases(){
+  is_help "${1:-}" && { help_releases; return 0; }
+  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+}
+
+# ── digest (written summary of what shipped) ───────────────────────────────
+cmd_digest(){
+  is_help "${1:-}" && { help_digest; return 0; }
+  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+}
+
+# ── init (write a config file) ─────────────────────────────────────────────
+cmd_init(){
+  is_help "${1:-}" && { help_init; return 0; }
+  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+}
+
+# ── per-command help ───────────────────────────────────────────────────────
+help_log(){
+  printf "\n  ${BD}muninn log${X} [--since <window>] [repo]\n\n"
+  printf "  A unified, reverse-chronological activity timeline across the whole estate —\n"
+  printf "  merged PRs, releases/tags, and commits, interleaved, newest first.\n\n"
+  printf "  ${BD}Arguments${X}\n"
+  printf "    repo            scope the timeline to a single repo\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    --since <window>  a window like 1w, 3d, 2mo ${DIM}(default: %s)${X}\n\n" "$SINCE"
+  printf "  ${DIM}Commits are local & fast; PR/release enrichment goes through gh (network).${X}\n\n"
+}
+help_releases(){
+  printf "\n  ${BD}muninn releases${X}\n\n"
+  printf "  Every tag/release across the estate — a changelog-of-changelogs. One block\n"
+  printf "  per repo, newest first: version, date, release title.\n\n"
+  printf "  ${DIM}Network — pulls 'gh release list' plus git tags per repo.${X}\n\n"
+}
+help_digest(){
+  printf "\n  ${BD}muninn digest${X} [--since <window>] [--md]\n\n"
+  printf "  A written summary of what shipped in the window — the headline feature.\n"
+  printf "  Per repo touched: commits, merged PRs (by title), releases cut; plus an\n"
+  printf "  estate-level headline of totals.\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    --since <window>  a window like 1w, 3d, 2mo ${DIM}(default: %s)${X}\n" "$SINCE"
+  printf "    --md              emit clean Markdown to stdout ${DIM}(redirect to a file)${X}\n\n"
+  printf "  ${DIM}Network — same sources as 'log', summarized. Doubles as a contractor's\n"
+  printf "  \"what I shipped\" report — client updates, invoicing notes, a brag-doc.${X}\n\n"
+}
+help_init(){
+  printf "\n  ${BD}muninn init${X} [--force]\n\n"
+  printf "  Write a config file (${DIM}%s${X}) with detected defaults — your GitHub\n" "$CONFIG"
+  printf "  login and estate root. Edit it afterward.\n\n"
+  printf "  ${BD}Config keys${X} ${DIM}(an env MUNINN_* var overrides the file)${X}\n"
+  printf "    MUNINN_ROOT · MUNINN_OWNER · MUNINN_FAMILY · MUNINN_SINCE\n\n"
+  printf "  ${DIM}If ~/.config/huginn/config exists and MUNINN_* is unset, muninn falls back\n"
+  printf "  to its HUGINN_ROOT/HUGINN_OWNER/HUGINN_FAMILY — a huginn user gets a working\n"
+  printf "  muninn with zero setup.${X}\n\n"
+}
+
+# ── help ────────────────────────────────────────────────────────────────────
+cmd_help(){
+  printf "\n  ${BD}muninn${X} ${DIM}— memory for your GitHub estate · %s${X}\n\n" "$ROOT"
+  printf "  ${DIM}remember${X}\n"
+  printf "    ${BD}log${X} [--since <window>] [repo]      activity timeline — PRs, releases, commits\n"
+  printf "    ${BD}releases${X}                           every tag/release across the estate\n"
+  printf "    ${BD}digest${X} [--since <window>] [--md]   a written summary of what shipped\n"
+  printf "  ${DIM}configure${X}\n"
+  printf "    ${BD}init${X} [--force]                     write a muninn config with detected defaults\n"
+  printf "    ${BD}help${X}                               this menu\n\n"
+  printf "  ${DIM}run${X} ${BD}muninn <command> help${X} ${DIM}for details & options on any command.${X}\n\n"
+}
+
+case "${1:-help}" in
+  log)      shift; cmd_log "$@";;
+  releases) shift; cmd_releases "$@";;
+  digest)   shift; cmd_digest "$@";;
+  init)     shift; cmd_init "$@";;
+  help|-h|--help) cmd_help;;
+  *) printf "${R}unknown command: %s${X}\n" "$1"; cmd_help; exit 1;;
+esac
