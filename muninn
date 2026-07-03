@@ -413,7 +413,24 @@ cmd_digest(){
 # ── init (write a config file) ─────────────────────────────────────────────
 cmd_init(){
   is_help "${1:-}" && { help_init; return 0; }
-  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+  local force=0; [ "${1:-}" = "--force" ] && force=1
+  mkdir -p "$(dirname "$CONFIG")"
+  if [ -f "$CONFIG" ] && [ "$force" = 0 ]; then
+    printf "\n  config already exists → ${C}%s${X}\n  ${DIM}edit it directly, or 'muninn init --force' to overwrite.${X}\n\n" "$CONFIG"; return 0
+  fi
+  local o; o="$(gh api user --jq .login 2>/dev/null)"
+  cat > "$CONFIG" <<CFG
+# muninn configuration — https://github.com/brett-buskirk/muninn
+MUNINN_OWNER="$o"
+MUNINN_ROOT="\$HOME/github-repos"
+MUNINN_FAMILY=""    # space-separated repos to exclude
+MUNINN_SINCE="1w"   # default --since window for log/digest
+CFG
+  printf "\n  ${G}✓${X} wrote ${C}%s${X}\n\n" "$CONFIG"
+  sed 's/^/    /' "$CONFIG"
+  printf "\n  ${DIM}edit as needed — env vars (MUNINN_*) override the file. If unset here,\n"
+  printf "  MUNINN_ROOT/OWNER/FAMILY still fall back to ~/.config/huginn/config when\n"
+  printf "  present, so this file only needs the keys you want to diverge on.${X}\n\n"
 }
 
 # ── per-command help ───────────────────────────────────────────────────────
