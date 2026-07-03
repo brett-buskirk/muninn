@@ -6,6 +6,11 @@ All notable changes to muninn are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-03
+
+First cut — the read-only archivist. Everything derived from git history and the GitHub API: no
+stored state, no database, same "derive, don't store" ethos as huginn.
+
 ### Added
 - **Config-driven** — settings resolve env → config file → smart defaults: `MUNINN_OWNER`,
   `MUNINN_ROOT`, `MUNINN_FAMILY`, `MUNINN_SINCE`. Config lives at `~/.config/muninn/config`. Falls
