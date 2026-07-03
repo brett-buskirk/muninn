@@ -52,6 +52,17 @@ age_short(){
   else                               printf '%dmo' $(( diff/2592000 ))
   fi
 }
+plural(){ [ "${1:-0}" = 1 ] && printf '' || printf 's'; }
+# escape the markdown chars most likely to mangle a raw commit/PR title
+md_escape(){ sed -E 's/([`*_])/\\\1/g' <<<"$1"; }
+# "Jun 25–Jul 2, 2026" — start date omits the year when it matches the end date's
+digest_daterange(){
+  local since_epoch="$1" now="$2" syear eyear sfmt
+  syear="$(date -d "@$since_epoch" +%Y)"; eyear="$(date -d "@$now" +%Y)"
+  if [ "$syear" = "$eyear" ]; then sfmt="$(date -d "@$since_epoch" +'%b %-d')"
+  else sfmt="$(date -d "@$since_epoch" +'%b %-d, %Y')"; fi
+  printf '%s–%s' "$sfmt" "$(date -d "@$now" +'%b %-d, %Y')"
+}
 
 # ── log (activity timeline — commits, merged PRs, releases) ───────────────
 cmd_log(){
@@ -229,7 +240,174 @@ cmd_releases(){
 # ── digest (written summary of what shipped) ───────────────────────────────
 cmd_digest(){
   is_help "${1:-}" && { help_digest; return 0; }
-  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+  local since="$SINCE" md=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --since) shift; since="${1:-$SINCE}";;
+    --md) md=1;;
+    -*) printf "  ${Y}ignoring unknown option: %s${X}\n" "$1";;
+    *) printf "  ${Y}ignoring unexpected argument: %s${X}\n" "$1";;
+  esac; shift; done
+
+  local sincegit; sincegit="$(since_to_gitdate "$since")" || {
+    printf "  ${R}invalid --since window:${X} %s ${DIM}(expected e.g. 1w, 3d, 2mo)${X}\n" "$since"; return 1; }
+  local since_epoch since_iso now
+  since_epoch="$(date -d "$sincegit" +%s 2>/dev/null)" || since_epoch=0
+  since_iso="$(date -d "$sincegit" +%Y-%m-%d 2>/dev/null)"
+  now="$(date +%s)"
+  need_owner || return 1
+
+  local -a ALL_REPOS; mapfile -t ALL_REPOS < <(repos)
+  local -A CNT_COMMITS=() DEFAULT_BRANCH=() PR_ITEMS=() REL_ITEMS=()
+  local d
+
+  # commits — local, fast; always collapsed to a count (this is a summary, not a timeline)
+  for d in "${ALL_REPOS[@]}"; do
+    is_family "$d" && continue
+    local GD="$ROOT/$d" def ref
+    def="$(git -C "$GD" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"; def="${def:-main}"
+    if git -C "$GD" rev-parse --verify -q "refs/remotes/origin/$def" >/dev/null 2>&1; then ref="origin/$def"
+    elif git -C "$GD" rev-parse --verify -q "refs/heads/$def" >/dev/null 2>&1; then ref="$def"
+    else ref="HEAD"; fi
+    local cnt; cnt="$(git -C "$GD" log --no-merges --since="$sincegit" --oneline "$ref" 2>/dev/null | wc -l)"
+    [ "$cnt" -gt 0 ] && { CNT_COMMITS[$d]="$cnt"; DEFAULT_BRANCH[$d]="$def"; }
+  done
+
+  # merged PRs — one estate-wide search, bucketed per repo, ascending by number
+  local prrows
+  prrows="$(gh search prs --owner "$OWNER" --merged --merged-at ">=$since_iso" --limit 200 \
+    --json repository,number,title --jq 'sort_by(.number) | .[] | [.repository.name,(.number|tostring),.title] | @tsv' 2>/dev/null | tr '\t' '\037')"
+  while IFS=$'\x1f' read -r repo num title; do
+    [ -z "$repo" ] && continue
+    is_family "$repo" && continue
+    if [ -n "${PR_ITEMS[$repo]:-}" ]; then PR_ITEMS[$repo]="${PR_ITEMS[$repo]}"$'\n'"$num"$'\x1f'"$title"
+    else PR_ITEMS[$repo]="$num"$'\x1f'"$title"; fi
+  done <<< "$prrows"
+
+  # releases (gh, network) + plain git tags a release doesn't cover — newest first per repo
+  for d in "${ALL_REPOS[@]}"; do
+    is_family "$d" && continue
+    local GD="$ROOT/$d" rj seen=" "
+    rj="$(gh release list -R "$OWNER/$d" --limit 10 --json tagName,name,publishedAt 2>/dev/null)"
+    if [ -n "$rj" ] && [ "$rj" != "[]" ]; then
+      while IFS=$'\x1f' read -r tag rname pub; do
+        [ -z "$tag" ] && continue
+        seen="$seen$tag "
+        local at; at="$(date -d "$pub" +%s 2>/dev/null)" || continue
+        [ "$at" -lt "$since_epoch" ] && continue
+        local sub=""
+        if [ -n "$rname" ] && [ "$rname" != "$tag" ]; then
+          if [ "${rname#"$tag"}" != "$rname" ]; then
+            sub="$(sed -E 's/^[[:space:]]*[—:-]+[[:space:]]*//' <<<"${rname#"$tag"}")"
+          else sub="$rname"; fi
+        fi
+        if [ -n "${REL_ITEMS[$d]:-}" ]; then REL_ITEMS[$d]="${REL_ITEMS[$d]}"$'\n'"$tag"$'\x1f'"$sub"
+        else REL_ITEMS[$d]="$tag"$'\x1f'"$sub"; fi
+      done < <(printf '%s' "$rj" | jq -r '.[] | [.tagName,.name,.publishedAt] | @tsv' | tr '\t' '\037')
+    fi
+    while read -r tg; do
+      [ -z "$tg" ] && continue
+      case "$seen" in *" $tg "*) continue;; esac
+      local tat; tat="$(git -C "$GD" log -1 --format=%at "$tg" 2>/dev/null)"
+      [ -z "$tat" ] && continue
+      [ "$tat" -lt "$since_epoch" ] && continue
+      if [ -n "${REL_ITEMS[$d]:-}" ]; then REL_ITEMS[$d]="${REL_ITEMS[$d]}"$'\n'"$tg"$'\x1f'""
+      else REL_ITEMS[$d]="$tg"$'\x1f'""; fi
+    done < <(git -C "$GD" tag -l 2>/dev/null)
+  done
+
+  # totals + touched-repo count
+  local total_commits=0 total_prs=0 total_rel=0 nrepos=0
+  for d in "${ALL_REPOS[@]}"; do
+    is_family "$d" && continue
+    local touched=0
+    if [ -n "${CNT_COMMITS[$d]:-}" ]; then total_commits=$(( total_commits + CNT_COMMITS[$d] )); touched=1; fi
+    if [ -n "${PR_ITEMS[$d]:-}" ]; then total_prs=$(( total_prs + $(wc -l <<<"${PR_ITEMS[$d]}") )); touched=1; fi
+    if [ -n "${REL_ITEMS[$d]:-}" ]; then total_rel=$(( total_rel + $(wc -l <<<"${REL_ITEMS[$d]}") )); touched=1; fi
+    [ "$touched" -eq 1 ] && nrepos=$((nrepos+1))
+  done
+
+  if [ "$md" = 1 ]; then
+    printf '# What shipped — %s\n\n' "$(digest_daterange "$since_epoch" "$now")"
+    if [ "$nrepos" -eq 0 ]; then printf 'Nothing shipped since %s.\n' "$since"; return 0; fi
+    printf 'Across %d repo%s: %d commit%s · %d PR%s merged · %d release%s.\n' \
+      "$nrepos" "$(plural "$nrepos")" "$total_commits" "$(plural "$total_commits")" \
+      "$total_prs" "$(plural "$total_prs")" "$total_rel" "$(plural "$total_rel")"
+    for d in "${ALL_REPOS[@]}"; do
+      is_family "$d" && continue
+      [ -z "${CNT_COMMITS[$d]:-}" ] && [ -z "${PR_ITEMS[$d]:-}" ] && [ -z "${REL_ITEMS[$d]:-}" ] && continue
+      printf '\n## %s\n' "$d"
+      if [ -n "${REL_ITEMS[$d]:-}" ]; then
+        while IFS=$'\x1f' read -r tag sub; do
+          [ -z "$tag" ] && continue
+          if [ -n "$sub" ]; then printf -- '- Released **%s** — %s\n' "$tag" "$(md_escape "$sub")"
+          else printf -- '- Released **%s**\n' "$tag"; fi
+        done <<< "${REL_ITEMS[$d]}"
+      fi
+      if [ -n "${PR_ITEMS[$d]:-}" ]; then
+        local prn; prn="$(wc -l <<<"${PR_ITEMS[$d]}")"
+        if [ "$prn" -gt 8 ]; then
+          printf -- '- Merged %d PRs\n' "$prn"
+        else
+          local joined=""
+          while IFS=$'\x1f' read -r num title; do
+            [ -z "$num" ] && continue
+            local frag="#$num $(md_escape "$title")"
+            if [ -n "$joined" ]; then joined="$joined · $frag"; else joined="$frag"; fi
+          done <<< "${PR_ITEMS[$d]}"
+          printf -- '- Merged %s\n' "$joined"
+        fi
+      fi
+      if [ -n "${CNT_COMMITS[$d]:-}" ]; then
+        local c="${CNT_COMMITS[$d]}" onlyc=0
+        [ -z "${PR_ITEMS[$d]:-}" ] && [ -z "${REL_ITEMS[$d]:-}" ] && onlyc=1
+        if [ "$onlyc" = 1 ]; then printf -- '- %d commit%s on `%s`\n' "$c" "$(plural "$c")" "${DEFAULT_BRANCH[$d]}"
+        else printf -- '- %d commit%s\n' "$c" "$(plural "$c")"; fi
+      fi
+    done
+    return 0
+  fi
+
+  printf "\n  ${BD}muninn digest${X}  ${DIM}· %s${X}\n\n" "$(digest_daterange "$since_epoch" "$now")"
+  if [ "$nrepos" -eq 0 ]; then
+    printf "  ${DIM}nothing shipped since %s${X}\n\n" "$since"
+    return 0
+  fi
+  printf "  Across ${BD}%d${X} repo%s: ${BD}%d${X} commit%s · ${BD}%d${X} PR%s merged · ${BD}%d${X} release%s\n" \
+    "$nrepos" "$(plural "$nrepos")" "$total_commits" "$(plural "$total_commits")" \
+    "$total_prs" "$(plural "$total_prs")" "$total_rel" "$(plural "$total_rel")"
+  for d in "${ALL_REPOS[@]}"; do
+    is_family "$d" && continue
+    [ -z "${CNT_COMMITS[$d]:-}" ] && [ -z "${PR_ITEMS[$d]:-}" ] && [ -z "${REL_ITEMS[$d]:-}" ] && continue
+    printf "\n  ${BD}%s${X}\n" "$d"
+    if [ -n "${REL_ITEMS[$d]:-}" ]; then
+      while IFS=$'\x1f' read -r tag sub; do
+        [ -z "$tag" ] && continue
+        if [ -n "$sub" ]; then printf "    ${G}⚑${X} Released ${BD}%s${X} — %s\n" "$tag" "$sub"
+        else printf "    ${G}⚑${X} Released ${BD}%s${X}\n" "$tag"; fi
+      done <<< "${REL_ITEMS[$d]}"
+    fi
+    if [ -n "${PR_ITEMS[$d]:-}" ]; then
+      local prn; prn="$(wc -l <<<"${PR_ITEMS[$d]}")"
+      if [ "$prn" -gt 8 ]; then
+        printf "    ${C}⑃${X} Merged ${BD}%d${X} PRs\n" "$prn"
+      else
+        local joined=""
+        while IFS=$'\x1f' read -r num title; do
+          [ -z "$num" ] && continue
+          local frag="#$num $title"
+          if [ -n "$joined" ]; then joined="$joined · $frag"; else joined="$frag"; fi
+        done <<< "${PR_ITEMS[$d]}"
+        printf "    ${C}⑃${X} Merged %s\n" "$joined"
+      fi
+    fi
+    if [ -n "${CNT_COMMITS[$d]:-}" ]; then
+      local c="${CNT_COMMITS[$d]}" onlyc=0
+      [ -z "${PR_ITEMS[$d]:-}" ] && [ -z "${REL_ITEMS[$d]:-}" ] && onlyc=1
+      if [ "$onlyc" = 1 ]; then printf "    ${DIM}●${X} %d commit%s on ${C}%s${X}\n" "$c" "$(plural "$c")" "${DEFAULT_BRANCH[$d]}"
+      else printf "    ${DIM}●${X} %d commit%s\n" "$c" "$(plural "$c")"; fi
+    fi
+  done
+  printf "\n"
 }
 
 # ── init (write a config file) ─────────────────────────────────────────────
@@ -264,11 +442,15 @@ help_releases(){
 help_digest(){
   printf "\n  ${BD}muninn digest${X} [--since <window>] [--md]\n\n"
   printf "  A written summary of what shipped in the window — the headline feature.\n"
-  printf "  Per repo touched: commits, merged PRs (by title), releases cut; plus an\n"
-  printf "  estate-level headline of totals.\n\n"
+  printf "  Repos with nothing in the window are omitted; for each repo touched, in\n"
+  printf "  order: releases cut, merged PRs (joined on one line, oldest first — a repo\n"
+  printf "  with more than 8 collapses to a count), then a commit count —\n"
+  printf "  ${DIM}\"on <branch>\"${X} is only added when commits are the sole event (no PRs/\n"
+  printf "  releases). Plus an estate-level headline of totals.\n\n"
   printf "  ${BD}Options${X}\n"
   printf "    --since <window>  a window like 1w, 3d, 2mo ${DIM}(default: %s)${X}\n" "$SINCE"
-  printf "    --md              emit clean Markdown to stdout ${DIM}(redirect to a file)${X}\n\n"
+  printf "    --md              emit clean Markdown to stdout ${DIM}(redirect to a file; backtick/\n"
+  printf "                      asterisk/underscore in titles are escaped so they render clean)${X}\n\n"
   printf "  ${DIM}Network — same sources as 'log', summarized. Doubles as a contractor's\n"
   printf "  \"what I shipped\" report — client updates, invoicing notes, a brag-doc.${X}\n\n"
 }
