@@ -30,10 +30,143 @@ is_help(){ case "${1:-}" in help|-h|--help) return 0;; *) return 1;; esac; }
 repos(){ (cd "$ROOT" && for d in */; do [ -d "${d}.git" ] && echo "${d%/}"; done | sort); }
 need_owner(){ [ -n "$OWNER" ] && return 0; OWNER="$(gh api user --jq .login 2>/dev/null)"; [ -n "$OWNER" ] && return 0; printf "  ${R}no GitHub owner set.${X} Set MUNINN_OWNER, add it to %s, or run ${BD}muninn init${X}.\n" "$CONFIG" >&2; return 1; }
 
+# turn a window like 1w/3d/2mo into a git-approxidate string ("N weeks ago")
+since_to_gitdate(){
+  local w="$1"
+  [[ "$w" =~ ^([0-9]+)(mo|[dwh])$ ]] || return 1
+  local n="${BASH_REMATCH[1]}" u="${BASH_REMATCH[2]}"
+  case "$u" in
+    h)  printf '%s hours ago' "$n";;
+    d)  printf '%s days ago' "$n";;
+    w)  printf '%s weeks ago' "$n";;
+    mo) printf '%s months ago' "$n";;
+  esac
+}
+# epoch seconds -> short age ("2d", "5w", …), for timeline rows
+age_short(){
+  local now diff; now=$(date +%s); diff=$(( now - $1 )); [ "$diff" -lt 0 ] && diff=0
+  if   [ "$diff" -lt 3600 ];    then printf '%dm'  $(( diff/60 ))
+  elif [ "$diff" -lt 86400 ];   then printf '%dh'  $(( diff/3600 ))
+  elif [ "$diff" -lt 604800 ];  then printf '%dd'  $(( diff/86400 ))
+  elif [ "$diff" -lt 2592000 ]; then printf '%dw'  $(( diff/604800 ))
+  else                               printf '%dmo' $(( diff/2592000 ))
+  fi
+}
+
 # ── log (activity timeline — commits, merged PRs, releases) ───────────────
 cmd_log(){
   is_help "${1:-}" && { help_log; return 0; }
-  printf "  ${DIM}(not yet implemented — coming in the next PR)${X}\n"
+  local since="$SINCE" target=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --since) shift; since="${1:-$SINCE}";;
+    -*) printf "  ${Y}ignoring unknown option: %s${X}\n" "$1";;
+    *) target="$1";;
+  esac; shift; done
+
+  local sincegit; sincegit="$(since_to_gitdate "$since")" || {
+    printf "  ${R}invalid --since window:${X} %s ${DIM}(expected e.g. 1w, 3d, 2mo)${X}\n" "$since"; return 1; }
+  local since_epoch since_iso
+  since_epoch="$(date -d "$sincegit" +%s 2>/dev/null)" || since_epoch=0
+  since_iso="$(date -d "$sincegit" +%Y-%m-%d 2>/dev/null)"
+
+  if [ -n "$target" ] && [ ! -d "$ROOT/$target/.git" ]; then
+    printf "  ${R}no such repo:${X} %s ${DIM}(under %s)${X}\n" "$target" "$ROOT"; return 1
+  fi
+  need_owner || return 1
+
+  local EVENTS; EVENTS="$(mktemp)"
+  trap 'rm -f "$EVENTS"' RETURN
+
+  # commits — local, fast. Merge commits are skipped (the PR they merged is
+  # already an event of its own); busy repos collapse to a single count line.
+  while read -r d; do
+    [ -n "$target" ] && [ "$d" != "$target" ] && continue
+    is_family "$d" && continue
+    local GD="$ROOT/$d" def ref
+    def="$(git -C "$GD" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"; def="${def:-main}"
+    if git -C "$GD" rev-parse --verify -q "refs/remotes/origin/$def" >/dev/null 2>&1; then ref="origin/$def"
+    elif git -C "$GD" rev-parse --verify -q "refs/heads/$def" >/dev/null 2>&1; then ref="$def"
+    else ref="HEAD"; fi
+
+    local rows nrows
+    rows="$(git -C "$GD" log --no-merges --since="$sincegit" --format='%at%x09%s' "$ref" 2>/dev/null)"
+    [ -z "$rows" ] && continue
+    nrows="$(wc -l <<<"$rows")"
+    if [ "$nrows" -gt 5 ]; then
+      printf '%s\x1f%s\x1fcommits\x1f%s\x1f\n' "$(cut -f1 <<<"$rows" | head -1)" "$d" "$nrows" >> "$EVENTS"
+    else
+      while IFS=$'\t' read -r at msg; do
+        printf '%s\x1f%s\x1fcommit\x1f\x1f%s\n' "$at" "$d" "$msg" >> "$EVENTS"
+      done <<< "$rows"
+    fi
+  done < <(repos)
+
+  # merged PRs — one estate-wide search covers every repo (network)
+  # NOTE: field separator is U+001F, not tab — bash `read` collapses
+  # consecutive tab/space/newline delimiters even with a custom tab IFS,
+  # which silently drops empty fields (e.g. an unnamed release) and
+  # shifts everything after them. \x1f is a real, non-collapsing delimiter.
+  local prrows
+  prrows="$(gh search prs --owner "$OWNER" --merged --merged-at ">=$since_iso" --limit 200 \
+    --json repository,number,title,closedAt --jq '.[] | [.repository.name,(.number|tostring),.title,.closedAt] | @tsv' 2>/dev/null | tr '\t' '\037')"
+  while IFS=$'\x1f' read -r repo num title closedAt; do
+    [ -z "$repo" ] && continue
+    [ -n "$target" ] && [ "$repo" != "$target" ] && continue
+    is_family "$repo" && continue
+    local at; at="$(date -d "$closedAt" +%s 2>/dev/null)" || continue
+    printf '%s\x1f%s\x1fpr\x1f%s\x1f%s\n' "$at" "$repo" "$num" "$title" >> "$EVENTS"
+  done <<< "$prrows"
+
+  # releases (gh, network) + any plain git tags a release doesn't cover (local)
+  while read -r d; do
+    [ -n "$target" ] && [ "$d" != "$target" ] && continue
+    is_family "$d" && continue
+    local GD="$ROOT/$d" rj seen=" "
+    rj="$(gh release list -R "$OWNER/$d" --limit 10 --json tagName,name,publishedAt 2>/dev/null)"
+    if [ -n "$rj" ] && [ "$rj" != "[]" ]; then
+      while IFS=$'\x1f' read -r tag rname pub; do
+        [ -z "$tag" ] && continue
+        seen="$seen$tag "
+        local at; at="$(date -d "$pub" +%s 2>/dev/null)" || continue
+        [ "$at" -lt "$since_epoch" ] && continue
+        local sub=""
+        if [ -n "$rname" ] && [ "$rname" != "$tag" ]; then
+          if [ "${rname#"$tag"}" != "$rname" ]; then
+            sub="$(sed -E 's/^[[:space:]]*[—:-]+[[:space:]]*//' <<<"${rname#"$tag"}")"
+          else sub="$rname"; fi
+        fi
+        printf '%s\x1f%s\x1frelease\x1f%s\x1f%s\n' "$at" "$d" "$tag" "$sub" >> "$EVENTS"
+      done < <(printf '%s' "$rj" | jq -r '.[] | [.tagName,.name,.publishedAt] | @tsv' | tr '\t' '\037')
+    fi
+    while read -r tg; do
+      [ -z "$tg" ] && continue
+      case "$seen" in *" $tg "*) continue;; esac
+      local tat; tat="$(git -C "$GD" log -1 --format=%at "$tg" 2>/dev/null)"
+      [ -z "$tat" ] && continue
+      [ "$tat" -lt "$since_epoch" ] && continue
+      printf '%s\x1f%s\x1frelease\x1f%s\x1f\n' "$tat" "$d" "$tg" >> "$EVENTS"
+    done < <(git -C "$GD" tag -l 2>/dev/null)
+  done < <(repos)
+
+  if [ ! -s "$EVENTS" ]; then
+    printf "\n  ${DIM}nothing since %s%s${X}\n\n" "$since" "$([ -n "$target" ] && echo " · $target")"
+    return 0
+  fi
+
+  printf "\n  ${BD}muninn log${X}  ${DIM}· since %s%s${X}\n\n" "$since" "$([ -n "$target" ] && echo " · $target")"
+
+  local n=0 at repo type fa fb
+  while IFS=$'\x1f' read -r at repo type fa fb; do
+    case "$type" in
+      pr)      printf "  ${DIM}%-3s${X}  ${BD}%-24s${X}  ${C}⑃${X} ${BD}#%s${X}  %s  ${DIM}(merged)${X}\n" "$(age_short "$at")" "$repo" "$fa" "$fb";;
+      release) printf "  ${DIM}%-3s${X}  ${BD}%-24s${X}  ${G}⚑${X} ${BD}%s${X}  %s\n" "$(age_short "$at")" "$repo" "$fa" "$fb";;
+      commits) printf "  ${DIM}%-3s${X}  ${BD}%-24s${X}  ${DIM}●${X}  %s commits\n" "$(age_short "$at")" "$repo" "$fa";;
+      commit)  printf "  ${DIM}%-3s${X}  ${BD}%-24s${X}  ${DIM}●${X}  %s\n" "$(age_short "$at")" "$repo" "$fb";;
+    esac
+    n=$((n+1))
+  done < <(sort -t $'\x1f' -k1,1nr "$EVENTS")
+
+  printf "\n  ${BD}%d events${X} ${DIM}since %s${X}\n\n" "$n" "$since"
 }
 
 # ── releases (changelog-of-changelogs) ─────────────────────────────────────
@@ -58,12 +191,15 @@ cmd_init(){
 help_log(){
   printf "\n  ${BD}muninn log${X} [--since <window>] [repo]\n\n"
   printf "  A unified, reverse-chronological activity timeline across the whole estate —\n"
-  printf "  merged PRs, releases/tags, and commits, interleaved, newest first.\n\n"
+  printf "  merged PRs (${C}⑃${X}), releases/tags (${G}⚑${X}), and commits (${DIM}●${X}), interleaved, newest first.\n"
+  printf "  A repo with more than 5 non-merge commits in the window collapses to a single\n"
+  printf "  ${DIM}●${X} N commits line so a busy week doesn't scroll forever.\n\n"
   printf "  ${BD}Arguments${X}\n"
   printf "    repo            scope the timeline to a single repo\n\n"
   printf "  ${BD}Options${X}\n"
   printf "    --since <window>  a window like 1w, 3d, 2mo ${DIM}(default: %s)${X}\n\n" "$SINCE"
-  printf "  ${DIM}Commits are local & fast; PR/release enrichment goes through gh (network).${X}\n\n"
+  printf "  ${DIM}Commits are local & fast; merged PRs are one estate-wide search; releases/tags\n"
+  printf "  are looked up per repo — the network cost of a full sweep, like 'doctor'.${X}\n\n"
 }
 help_releases(){
   printf "\n  ${BD}muninn releases${X}\n\n"
