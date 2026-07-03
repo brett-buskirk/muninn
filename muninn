@@ -172,7 +172,58 @@ cmd_log(){
 # ── releases (changelog-of-changelogs) ─────────────────────────────────────
 cmd_releases(){
   is_help "${1:-}" && { help_releases; return 0; }
-  printf "  ${DIM}(not yet implemented — coming in a later PR)${X}\n"
+  need_owner || return 1
+
+  printf "\n  ${BD}muninn releases${X}  ${DIM}· changelog-of-changelogs${X}\n"
+
+  local nrepos=0 ntotal=0
+  while read -r d; do
+    is_family "$d" && continue
+    local GD="$ROOT/$d" rj seen=" "
+    local -a ROWS=()
+    rj="$(gh release list -R "$OWNER/$d" --limit 100 --json tagName,name,publishedAt,isPrerelease 2>/dev/null)"
+    if [ -n "$rj" ] && [ "$rj" != "[]" ]; then
+      while IFS=$'\x1f' read -r tag rname pub pre; do
+        [ -z "$tag" ] && continue
+        seen="$seen$tag "
+        local at; at="$(date -d "$pub" +%s 2>/dev/null)" || continue
+        local dt; dt="$(date -d "$pub" +%Y-%m-%d 2>/dev/null)"
+        local sub=""
+        if [ -n "$rname" ] && [ "$rname" != "$tag" ]; then
+          if [ "${rname#"$tag"}" != "$rname" ]; then
+            sub="$(sed -E 's/^[[:space:]]*[—:-]+[[:space:]]*//' <<<"${rname#"$tag"}")"
+          else sub="$rname"; fi
+        fi
+        ROWS+=("$at"$'\x1f'"$tag"$'\x1f'"$dt"$'\x1f'"$sub"$'\x1f'"$pre")
+      done < <(printf '%s' "$rj" | jq -r '.[] | [.tagName,.name,.publishedAt,(.isPrerelease|tostring)] | @tsv' | tr '\t' '\037')
+    fi
+    while read -r tg; do
+      [ -z "$tg" ] && continue
+      case "$seen" in *" $tg "*) continue;; esac
+      local tat; tat="$(git -C "$GD" log -1 --format=%at "$tg" 2>/dev/null)"
+      [ -z "$tat" ] && continue
+      local tdt; tdt="$(date -d "@$tat" +%Y-%m-%d 2>/dev/null)"
+      ROWS+=("$tat"$'\x1f'"$tg"$'\x1f'"$tdt"$'\x1f'""$'\x1f'"false")
+    done < <(git -C "$GD" tag -l 2>/dev/null)
+
+    [ "${#ROWS[@]}" -eq 0 ] && continue
+    nrepos=$((nrepos+1))
+    printf "\n  ${BD}%s${X}\n" "$d"
+    while IFS=$'\x1f' read -r at tag dt sub pre; do
+      if [ "$pre" = "true" ]; then
+        printf "    ${BD}%-10s${X}  ${DIM}%s${X}  %s ${Y}(pre)${X}\n" "$tag" "$dt" "$sub"
+      else
+        printf "    ${BD}%-10s${X}  ${DIM}%s${X}  %s\n" "$tag" "$dt" "$sub"
+      fi
+      ntotal=$((ntotal+1))
+    done < <(printf '%s\n' "${ROWS[@]}" | sort -t $'\x1f' -k1,1nr)
+  done < <(repos)
+
+  if [ "$nrepos" -eq 0 ]; then
+    printf "\n  ${DIM}no tags or releases found anywhere in the estate${X}\n\n"
+    return 0
+  fi
+  printf "\n  ${BD}%d releases${X} ${DIM}across %d repos${X}\n\n" "$ntotal" "$nrepos"
 }
 
 # ── digest (written summary of what shipped) ───────────────────────────────
@@ -204,8 +255,11 @@ help_log(){
 help_releases(){
   printf "\n  ${BD}muninn releases${X}\n\n"
   printf "  Every tag/release across the estate — a changelog-of-changelogs. One block\n"
-  printf "  per repo, newest first: version, date, release title.\n\n"
-  printf "  ${DIM}Network — pulls 'gh release list' plus git tags per repo.${X}\n\n"
+  printf "  per repo (repos with none are omitted), newest first within each: version,\n"
+  printf "  date, release title. Plain git tags without a matching GitHub release are\n"
+  printf "  folded in too; pre-releases are flagged ${Y}(pre)${X}.\n\n"
+  printf "  ${DIM}Network — pulls 'gh release list' (up to 100 per repo) plus git tags,\n"
+  printf "  once per repo in the estate — the same cost class as 'doctor'.${X}\n\n"
 }
 help_digest(){
   printf "\n  ${BD}muninn digest${X} [--since <window>] [--md]\n\n"
