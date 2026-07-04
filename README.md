@@ -2,6 +2,10 @@
 
 Memory for your GitHub estate — what you shipped, and when.
 
+<p align="center">
+  <img src="docs/muninn-digest.png" alt="muninn digest — a written summary of what shipped across the estate" width="720">
+</p>
+
 In Norse myth Odin keeps two ravens: **Huginn** (*thought*) and **Muninn** (*memory*). They fly the
 world and report back what they see. [`huginn`](https://github.com/brett-buskirk/huginn) is Muninn's
 sibling — a stateless, present-tense CLI that reports what your estate looks like *right now*: current
