@@ -5,7 +5,7 @@
 # live run — muninn queries GitHub by owner, so a demo can't be faked) into a
 # clean terminal-window PNG that matches the rest of the toolkit's shots.
 #
-# Dev-only.  pip3 install --user rich cairosvg  &&  python3 docs/screenshot.py
+# Dev-only.  pip3 install --user rich cairosvg  &&  python3 scripts/screenshot.py
 import os, tempfile
 from rich.console import Console
 from rich.text import Text
@@ -42,7 +42,7 @@ for t in texts:
     con.print(t)
 svg = tempfile.mktemp(suffix=".svg")
 con.save_svg(svg, title="muninn digest")
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "muninn-digest.png")
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "muninn-digest.png")
 cairosvg.svg2png(url=svg, write_to=out, scale=2)
 os.unlink(svg)
 print("wrote", out)
