@@ -6,6 +6,10 @@ All notable changes to muninn are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`CHEATSHEET.md`** — a one-page reference to every command, alias, option, and behavior, linked from
+  the README.
+
 ## [0.1.0] - 2026-07-03
 
 First cut — the read-only archivist. Everything derived from git history and the GitHub API: no
