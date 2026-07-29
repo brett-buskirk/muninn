@@ -56,8 +56,8 @@ For the narrative version see the [README](README.md); for per-command detail in
 - **Network cost** — `git log`/tags are local and instant. Merged PRs are **one** estate-wide
   `gh search prs`; releases/tags are looked up **per repo** — the network cost of a full sweep, the
   same cost class as huginn's `doctor`.
-- **Exit codes** — `0` on success; `1` on error (unknown command, a bad `--since` window, or no
-  resolvable GitHub owner).
+- **Exit codes** — `0` on success; `1` on error (unknown command, a bad `--since` window, an
+  unrecognized repo passed to `log`, or no resolvable GitHub owner).
 
 ---
 
@@ -65,8 +65,9 @@ For the narrative version see the [README](README.md); for per-command detail in
 
 A unified, reverse-chronological activity **timeline across the whole estate** — merged PRs (`⑃`),
 releases/tags (`⚑`), and commits (`●`), interleaved, newest first. An optional `repo` argument scopes
-the timeline to one repo. A repo with more than **5** non-merge commits in the window collapses to a
-single `● N commits` line, so a busy week doesn't scroll forever.
+the timeline to one repo — a name that doesn't exist under the estate root errors (exit 1) rather
+than silently matching nothing. A repo with more than **5** non-merge commits in the window collapses
+to a single `● N commits` line, so a busy week doesn't scroll forever.
 
 Commits are local & fast; merged PRs are one estate-wide search; releases/tags are looked up per repo.
 
@@ -106,13 +107,14 @@ NO_COLOR=1 muninn releases   # plain text for a pipe or a log
 ## `digest`
 
 A **written summary of what shipped** in the window — the headline feature. Repos with nothing in the
-window are omitted; for each repo touched, in order: releases cut, merged PRs (joined on one line,
-oldest first — a repo with more than **8** collapses to a count), then a commit count. `on <branch>`
-is added only when commits are the sole event (no PRs or releases). Closes with an estate-level
-headline of totals.
+window are omitted; for each repo touched, in order: releases cut (`⚑`), merged PRs (`⑃`, joined on
+one line, oldest first — a repo with more than **8** collapses to a count), then a commit count (`●`).
+`on <branch>` is added only when commits are the sole event (no PRs or releases). Closes with an
+estate-level headline of totals.
 
 Same sources as [`log`](#log), summarized. Doubles as a contractor's *"what I shipped"* report — client
-updates, invoicing notes, a brag-doc.
+updates, invoicing notes, a brag-doc. Unlike `log`, `digest` takes no positional repo argument — one
+is a warning and otherwise ignored, not a scope.
 
 ```sh
 muninn digest                       # terminal view, default window 1w
